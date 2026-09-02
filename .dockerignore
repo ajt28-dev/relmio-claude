@@ -1,0 +1,53 @@
+# Build context for docker/claude-relay/Dockerfile.
+# The image copies only package.json, package-lock.json, .npmrc, LICENSE,
+# NOTICE, src/, and the build-time verifier. Everything below is excluded so
+# no credential, local dependency tree, history, or test material can reach
+# an image layer even by accident.
+
+# Version control and CI
+.git
+.github
+.gitattributes
+.gitignore
+.agents
+
+# Local dependency trees (Windows binaries; Linux deps are installed in-image)
+node_modules
+**/node_modules
+
+# Credentials and local runtime state
+.env
+.env.*
+!docker/claude-relay/.env.example
+auth.json
+*.pem
+*.key
+.codex
+.claude
+.codex-local-context.md
+**/.credentials.json
+
+# Tests, docs, tooling, and other non-runtime material
+test
+coverage
+web
+docs
+npm
+packaging
+scripts
+tasks
+dist
+.release
+graphify-out
+*.md
+Start Wizard.*
+
+# Editor and OS junk
+.vscode
+.idea
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

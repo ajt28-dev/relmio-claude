@@ -1,0 +1,72 @@
+# Claude Relay - private sidecar beside an existing n8n container.
+#
+# Copy this file to compose.yml in the same directory, create .env from
+# .env.example (chmod 600), then run from this directory:
+#
+#   docker compose up -d --build
+#
+# The relay joins the n8n container's EXISTING Docker network (external, never
+# created here) and is reachable from n8n at:
+#
+#   http://n8n-claude-relay:10532/v1
+#
+# Nothing is published to the VPS host: there is deliberately no `ports:` key.
+# There are no Traefik labels. n8n itself is never touched.
+
+services:
+  n8n-claude-relay:
+    build:
+      context: ../..
+      dockerfile: docker/claude-relay/Dockerfile
+    image: claude-relay:local
+    container_name: n8n-claude-relay
+    restart: unless-stopped
+    init: true
+    environment:
+      # Claude subscription credential - stays inside this container only.
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:?Set CLAUDE_CODE_OAUTH_TOKEN in .env}
+      # Relay bearer key - the only credential n8n ever receives.
+      CLAUDE_RELAY_API_KEY: ${CLAUDE_RELAY_API_KEY:?Set CLAUDE_RELAY_API_KEY in .env}
+      CLAUDE_RELAY_HOST: 0.0.0.0
+      CLAUDE_RELAY_PORT: "10532"
+      CLAUDE_RELAY_DEBUG: ${CLAUDE_RELAY_DEBUG:-0}
+    # Container-internal port only; Docker DNS reaches it, the host does not.
+    expose:
+      - "10532"
+    networks:
+      n8n-network:
+        aliases:
+          - n8n-claude-relay
+    volumes:
+      # Claude runtime config and session transcripts (~/.claude). A named
+      # volume keeps them off RAM; nothing from the host is mounted.
+      - n8n-claude-relay-home:/home/node
+    tmpfs:
+      # Bundled runtime extraction ({tmpdir}/claude-<uid>) and relay scratch cwd.
+      - /tmp:size=512m,mode=1777,nodev,nosuid
+    # Post-validation hardening: enable once the VPS run confirms the runtime
+    # writes only to /home/node and /tmp.
+    # read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    mem_limit: 2g
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    labels:
+      io.claude-relay.managed: "true"
+
+networks:
+  n8n-network:
+    external: true
+    name: ${N8N_DOCKER_NETWORK:?Set N8N_DOCKER_NETWORK in .env to the n8n container's Docker network}
+
+volumes:
+  n8n-claude-relay-home:
+    labels:
+      io.claude-relay.managed: "true"
