@@ -6,6 +6,17 @@ const MAX_TOKEN_LENGTH = 512;
 const MODEL_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/u;
 const DEFAULT_TIMEOUT_MS = 180_000;
 
+// Plain inference is a single model turn.
+const PLAIN_MAX_TURNS = 1;
+// outputFormat sessions are "end-turn tool sessions": the model delivers its
+// result by CALLING the SDK's internal StructuredOutput tool, and on schema
+// mismatch the SDK re-prompts up to its MAX_STRUCTURED_OUTPUT_RETRIES
+// (default 2). One agentic turn per attempt: 1 initial + 2 bounded retries.
+// With maxTurns: 1 any imperfect first turn failed live as "Reached maximum
+// number of turns (1)". This budget only covers that internal delivery tool;
+// every external-tool restriction below still applies unchanged.
+const STRUCTURED_OUTPUT_MAX_TURNS = 3;
+
 // Claude Code resolves credentials in a fixed precedence order in which
 // ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY outrank CLAUDE_CODE_OAUTH_TOKEN.
 // A relay configured for subscription OAuth must therefore strip every
@@ -246,8 +257,12 @@ export async function queryClaude(
     settingSources: [],
     allowedTools: [],
     disallowedTools: [...DISALLOWED_BUILT_IN_TOOLS],
-    // Inference-only: one model turn, no agentic tool loop.
-    maxTurns: 1,
+    // Inference-only: no agentic tool loop. Structured output alone gets the
+    // bounded extra turns its internal delivery tool and retries require.
+    maxTurns:
+      safeOutputFormat === undefined
+        ? PLAIN_MAX_TURNS
+        : STRUCTURED_OUTPUT_MAX_TURNS,
     ...(safeModel === undefined ? {} : { model: safeModel }),
     ...(safeSystemPrompt === undefined ? {} : { systemPrompt: safeSystemPrompt }),
     ...(safeOutputFormat === undefined ? {} : { outputFormat: safeOutputFormat }),

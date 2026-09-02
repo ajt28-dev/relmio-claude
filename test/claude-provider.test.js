@@ -212,11 +212,41 @@ test("queryClaude passes outputFormat through and returns structured_output", as
     },
   );
 
-  assert.deepEqual(fake.capture.invocation.options.outputFormat, {
-    type: "json_schema",
-    schema,
-  });
+  const { options } = fake.capture.invocation;
+  assert.deepEqual(options.outputFormat, { type: "json_schema", schema });
   assert.deepEqual(result.structuredOutput, structured);
+
+  // Structured mode gets exactly the bounded turn budget the SDK's internal
+  // StructuredOutput delivery tool and its schema-retry mechanism require
+  // (1 initial attempt + 2 re-prompts) - nothing more.
+  assert.equal(options.maxTurns, 3);
+  // And none of the inference-only protections loosen in structured mode:
+  // no executable tools of any kind reach the SDK.
+  assert.deepEqual(options.allowedTools, []);
+  assert.deepEqual(options.disallowedTools, [...DISALLOWED_BUILT_IN_TOOLS]);
+  assert.deepEqual(options.settingSources, []);
+  assert.equal(options.tools, undefined);
+  assert.equal(options.mcpServers, undefined);
+  assert.equal(options.canUseTool, undefined);
+  assert.equal(options.env.ANTHROPIC_API_KEY, undefined);
+  assert.equal(options.env.ANTHROPIC_AUTH_TOKEN, undefined);
+});
+
+test("plain completions stay single-turn with no tool surface", async () => {
+  const fake = createFakeQuery(successMessages());
+  await queryClaude(
+    { prompt: "hello" },
+    {
+      environment: { CLAUDE_CODE_OAUTH_TOKEN: FAKE_TOKEN },
+      queryImpl: fake,
+    },
+  );
+  const { options } = fake.capture.invocation;
+  assert.equal(options.maxTurns, 1);
+  assert.equal(options.outputFormat, undefined);
+  assert.equal(options.tools, undefined);
+  assert.equal(options.mcpServers, undefined);
+  assert.equal(options.canUseTool, undefined);
 });
 
 test("queryClaude redacts the OAuth token from SDK failure messages", async () => {
