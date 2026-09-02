@@ -200,7 +200,12 @@ test("request validation returns OpenAI-shaped errors", async (t) => {
     ],
     [
       chatBody({
-        messages: [{ role: "user", content: [{ type: "text", text: "x" }] }],
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "image_url", image_url: { url: "https://x" } }],
+          },
+        ],
       }),
       400,
       "multimodal_not_supported",
@@ -539,6 +544,102 @@ test("tool decision failures surface as structured_output_failed", async (t) => 
   });
   assert.equal(exhausted.status, 502);
   assert.equal((await exhausted.json()).error.code, "structured_output_failed");
+});
+
+test("n8n-style text-array content reaches the tool-decision path", async (t) => {
+  // Regression fixture for the live n8n 2.36.7 AI Agent failure: LangChain
+  // encodes plain text as OpenAI content-part arrays.
+  const provider = toolDecisionProvider({
+    type: "tool_calls",
+    calls: [{ name: "multiply_numbers", arguments: { a: 1847, b: 392 } }],
+  });
+  const { origin } = await withRelay(t, { provider });
+  const response = await fetch(`${origin}/v1/chat/completions`, {
+    method: "POST",
+    headers: authorizedHeaders(),
+    body: JSON.stringify({
+      model: "claude-relay-default",
+      tools: [MULTIPLY_TOOL],
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "What is 1847 multiplied by 392? Use the calculator tool.",
+            },
+          ],
+        },
+      ],
+    }),
+  });
+  assert.equal(response.status, 200, "must not be rejected as multimodal");
+  const body = await response.json();
+  assert.equal(body.choices[0].finish_reason, "tool_calls");
+
+  const { request } = provider.capture.calls[0];
+  assert.equal(
+    request.prompt,
+    "What is 1847 multiplied by 392? Use the calculator tool.",
+  );
+  // Still no executable tool definitions reach the provider.
+  assert.deepEqual(
+    Object.keys(request).sort(),
+    ["model", "outputFormat", "prompt", "systemPrompt"],
+  );
+});
+
+test("text-array follow-up loop with a text-array tool result completes", async (t) => {
+  const provider = toolDecisionProvider({
+    type: "final",
+    content: "1847 multiplied by 392 is 724024.",
+  });
+  const { origin } = await withRelay(t, { provider });
+  const response = await fetch(`${origin}/v1/chat/completions`, {
+    method: "POST",
+    headers: authorizedHeaders(),
+    body: JSON.stringify({
+      model: "claude-relay-default",
+      tools: [MULTIPLY_TOOL],
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "What is 1847 multiplied by 392?" }],
+        },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_n8n1",
+              type: "function",
+              function: {
+                name: "multiply_numbers",
+                arguments: '{"a":1847,"b":392}',
+              },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          tool_call_id: "call_n8n1",
+          content: [{ type: "text", text: "724024" }],
+        },
+      ],
+    }),
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.choices[0].finish_reason, "stop");
+  assert.match(body.choices[0].message.content, /724024/u);
+
+  const { request } = provider.capture.calls[0];
+  assert.ok(
+    request.prompt.includes(
+      "Tool result [id: call_n8n1] [function: multiply_numbers]:\n724024",
+    ),
+    "text-array tool result must flatten into the transcript",
+  );
 });
 
 test("plain requests still bypass structured-output mode entirely", async (t) => {

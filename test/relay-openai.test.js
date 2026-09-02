@@ -162,9 +162,16 @@ test("translation rejects unsupported features explicitly", () => {
       "messages[0].tool_calls[0].type",
     ],
     [
-      { messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] },
+      {
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "image_url", image_url: { url: "https://x/y.png" } }],
+          },
+        ],
+      },
       "multimodal_not_supported",
-      "messages[0].content",
+      "messages[0].content[0]",
     ],
   ];
 
@@ -192,6 +199,86 @@ test("translation tolerates empty tool arrays and stream: false", () => {
     max_tokens: 512,
   });
   assert.equal(prompt, "hi");
+});
+
+test("text-only content-part arrays flatten to the same plain strings", () => {
+  const plain = translateChatCompletionRequest({
+    messages: [{ role: "user", content: "hello" }],
+  });
+  const asParts = translateChatCompletionRequest({
+    messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+  });
+  assert.deepEqual(asParts, plain);
+
+  const multi = translateChatCompletionRequest({
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "line one" },
+          { type: "text", text: "line two" },
+        ],
+      },
+    ],
+  });
+  assert.equal(multi.prompt, "line one\nline two");
+
+  const system = translateChatCompletionRequest({
+    messages: [
+      { role: "system", content: [{ type: "text", text: "You are terse." }] },
+      { role: "user", content: "hi" },
+    ],
+  });
+  assert.equal(system.systemPrompt, "You are terse.");
+
+  const history = translateChatCompletionRequest({
+    messages: [
+      { role: "user", content: "My name is Anna." },
+      { role: "assistant", content: [{ type: "text", text: "Hello Anna." }] },
+      { role: "user", content: "What is my name?" },
+    ],
+  });
+  assert.ok(history.prompt.includes("Assistant: Hello Anna."));
+});
+
+test("multimodal and malformed content parts still fail explicitly", () => {
+  const cases = [
+    // Genuinely multimodal part types: explicit unsupported-feature error.
+    [
+      [{ type: "image_url", image_url: { url: "https://x/y.png" } }],
+      "multimodal_not_supported",
+      "messages[0].content[0]",
+    ],
+    // Mixed text + image must error on the image, never silently drop it.
+    [
+      [
+        { type: "text", text: "look at this" },
+        { type: "image_url", image_url: { url: "https://x/y.png" } },
+      ],
+      "multimodal_not_supported",
+      "messages[0].content[1]",
+    ],
+    [[{ type: "input_audio", input_audio: {} }], "multimodal_not_supported", "messages[0].content[0]"],
+    [[{ type: "file", file: {} }], "multimodal_not_supported", "messages[0].content[0]"],
+    [[{ type: "image" }], "multimodal_not_supported", "messages[0].content[0]"],
+    // Malformed text parts: deterministic validation errors.
+    [[{ type: "text" }], "invalid_content", "messages[0].content[0].text"],
+    [[{ type: "text", text: 5 }], "invalid_content", "messages[0].content[0].text"],
+    [["bare-string-part"], "invalid_content", "messages[0].content[0]"],
+    [[{}], "invalid_content", "messages[0].content[0]"],
+    [[], "invalid_content", "messages[0].content"],
+  ];
+  for (const [content, code, param] of cases) {
+    assert.throws(
+      () =>
+        translateChatCompletionRequest({
+          messages: [{ role: "user", content }],
+        }),
+      (error) =>
+        error.status === 400 && error.code === code && error.param === param,
+      `${code} for ${JSON.stringify(content).slice(0, 60)}`,
+    );
+  }
 });
 
 test("translation validates message structure", () => {

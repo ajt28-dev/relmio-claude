@@ -82,14 +82,64 @@ function assertNoUnsupportedFeatures(body) {
   }
 }
 
-function rejectMultimodalContent(content, param) {
-  if (Array.isArray(content)) {
-    throw unsupportedFeature(
-      "Multimodal content arrays are not supported in this relay version. Send content as a plain string.",
-      param,
-      "multimodal_not_supported",
+const MAX_CONTENT_PARTS = 100;
+
+// OpenAI-compatible clients (n8n/LangChain included) may encode ordinary
+// text as content-part arrays: [{ type: "text", text: "..." }]. Those are
+// accepted and flattened to a plain string, in order. This is NOT multimodal
+// support: any non-text part (image_url, input_audio, file, image, ...)
+// still fails explicitly, and unsupported parts are never silently dropped.
+function contentPartsToText(parts, param) {
+  if (parts.length === 0 || parts.length > MAX_CONTENT_PARTS) {
+    throw invalidRequest(
+      `${param} must contain between 1 and ${MAX_CONTENT_PARTS} content parts.`,
+      { param, code: "invalid_content" },
     );
   }
+  const texts = [];
+  for (const [index, part] of parts.entries()) {
+    const partParam = `${param}[${index}]`;
+    if (
+      part === null ||
+      typeof part !== "object" ||
+      Array.isArray(part) ||
+      typeof part.type !== "string"
+    ) {
+      throw invalidRequest(
+        `${partParam} must be an object with a string type field.`,
+        { param: partParam, code: "invalid_content" },
+      );
+    }
+    if (part.type !== "text") {
+      throw unsupportedFeature(
+        `Content parts of type \`${part.type.slice(0, 32)}\` are not supported in this relay version. Only text content is supported.`,
+        partParam,
+        "multimodal_not_supported",
+      );
+    }
+    if (typeof part.text !== "string") {
+      throw invalidRequest(`${partParam}.text must be a string.`, {
+        param: `${partParam}.text`,
+        code: "invalid_content",
+      });
+    }
+    texts.push(part.text);
+  }
+  // Parts are separate blocks; a newline is the join LangChain itself uses
+  // when flattening text parts.
+  return texts.join("\n");
+}
+
+// string -> unchanged; text-part array -> flattened string; anything else ->
+// null so the caller raises its role-specific error.
+function normalizeTextContent(content, param) {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return contentPartsToText(content, param);
+  }
+  return null;
 }
 
 function validateHistoricalToolCall(entry, param) {
@@ -150,35 +200,39 @@ function validateMessage(message, index) {
   }
 
   if (role === "system" || role === "user") {
-    rejectMultimodalContent(content, `${param}.content`);
-    if (typeof content !== "string") {
-      throw invalidRequest(`${param}.content must be a string.`, {
-        param: `${param}.content`,
-        code: "invalid_content",
-      });
+    const text = normalizeTextContent(content, `${param}.content`);
+    if (text === null) {
+      throw invalidRequest(
+        `${param}.content must be a string or an array of text content parts.`,
+        { param: `${param}.content`, code: "invalid_content" },
+      );
     }
-    return { role, content };
+    return { role, content: text };
   }
 
   if (role === "tool") {
-    rejectMultimodalContent(content, `${param}.content`);
     if (typeof message.tool_call_id !== "string" || message.tool_call_id === "") {
       throw invalidRequest(
         `${param}.tool_call_id is required for tool messages.`,
         { param: `${param}.tool_call_id`, code: "invalid_tool_result" },
       );
     }
-    if (typeof content !== "string") {
+    const text = normalizeTextContent(content, `${param}.content`);
+    if (text === null) {
       throw invalidRequest(
-        `${param}.content must be a string for tool messages.`,
+        `${param}.content must be a string or an array of text content parts.`,
         { param: `${param}.content`, code: "invalid_tool_result" },
       );
     }
-    return { role, content, toolCallId: message.tool_call_id };
+    return { role, content: text, toolCallId: message.tool_call_id };
   }
 
-  // Assistant: plain content, tool calls, or both.
-  rejectMultimodalContent(content, `${param}.content`);
+  // Assistant: plain content, text parts, tool calls, or content plus calls.
+  // Text-part arrays flatten to a string; null stays null and then requires
+  // tool_calls, exactly as before.
+  const normalizedContent = Array.isArray(content)
+    ? contentPartsToText(content, `${param}.content`)
+    : content;
   const hasToolCalls =
     message.tool_calls !== undefined &&
     message.tool_calls !== null &&
@@ -198,13 +252,17 @@ function validateMessage(message, index) {
       validateHistoricalToolCall(entry, `${param}.tool_calls[${callIndex}]`),
     );
   }
-  if (content !== null && content !== undefined && typeof content !== "string") {
+  if (
+    normalizedContent !== null &&
+    normalizedContent !== undefined &&
+    typeof normalizedContent !== "string"
+  ) {
     throw invalidRequest(`${param}.content must be a string or null.`, {
       param: `${param}.content`,
       code: "invalid_content",
     });
   }
-  if (typeof content !== "string" && toolCalls.length === 0) {
+  if (typeof normalizedContent !== "string" && toolCalls.length === 0) {
     throw invalidRequest(
       `${param} must contain content or tool_calls.`,
       { param, code: "invalid_message" },
@@ -212,7 +270,7 @@ function validateMessage(message, index) {
   }
   return {
     role,
-    content: typeof content === "string" ? content : null,
+    content: typeof normalizedContent === "string" ? normalizedContent : null,
     toolCalls,
   };
 }
